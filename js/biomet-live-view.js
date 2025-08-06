@@ -1,7 +1,7 @@
 // Biomet Live View JavaScript
 
 // PRODUCTION CONFIG: Set to false to disable test mode button in production
-const ENABLE_TEST_MODE = false;
+const ENABLE_TEST_MODE = true;
 
 let isConnected = false;
 let isPolling = false;
@@ -478,7 +478,9 @@ function createChart(parameter = "AirTC") {
   const unit = paramInfo?.unit || "";
 
   // Update modal title
-  document.getElementById("plot-modal-titel").textContent = `${label} Time Series`;
+  document.getElementById(
+    "plot-modal-titel"
+  ).textContent = `${label} Time Series`;
 
   chart = new Chart(ctx, {
     type: "line",
@@ -587,7 +589,7 @@ function storeDataPoint(parsedData) {
 
   // Update live chart if it's open
   updateLiveChart(dataPoint);
-  
+
   // Update live map if it's open
   updateLiveMap();
 }
@@ -608,9 +610,14 @@ async function pollDevice() {
 
   try {
     let response;
-    
+
     // Check if we're actually connected to a serial device or use test data
-    if (window.selectedPort && window.selectedPort.readable && reader && writer) {
+    if (
+      window.selectedPort &&
+      window.selectedPort.readable &&
+      reader &&
+      writer
+    ) {
       // Real serial device polling
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error("Read timeout")), 1000)
@@ -693,17 +700,18 @@ function stopPolling() {
 function showMap() {
   if (!map) {
     // Initialize map centered over Dortmund, Germany
-    map = L.map('map').setView([51.5136, 7.4653], 13);
-    
+    map = L.map("map").setView([51.5136, 7.4653], 13);
+
     // Add OpenStreetMap tiles
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution:
+        '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     }).addTo(map);
   }
-  
+
   // Update map with current route data
   updateMapRoute();
-  
+
   // Force map to resize after modal is shown
   setTimeout(() => {
     map.invalidateSize();
@@ -712,10 +720,10 @@ function showMap() {
 
 function updateMapRoute() {
   if (!map) return;
-  
+
   // Get GPS coordinates from data history
   const coordinates = dataHistory
-    .filter(point => {
+    .filter((point) => {
       const lat = point.data.Latitude;
       const lon = point.data.Longitude;
       return lat && lon && !isNaN(lat) && !isNaN(lon) && lat !== 0 && lon !== 0;
@@ -724,44 +732,44 @@ function updateMapRoute() {
       lat: point.data.Latitude,
       lon: point.data.Longitude,
       timestamp: point.timestamp,
-      index: index
+      index: index,
     }));
-  
+
   // Clear existing markers
-  gpsMarkers.forEach(marker => map.removeLayer(marker));
+  gpsMarkers.forEach((marker) => map.removeLayer(marker));
   gpsMarkers = [];
-  
+
   // Remove existing current position marker
   if (currentPositionMarker) {
     map.removeLayer(currentPositionMarker);
   }
-  
+
   if (coordinates.length > 0) {
     // Add GPS point markers as circles
     coordinates.forEach((coord, index) => {
       const isFirst = index === 0;
       const isLast = index === coordinates.length - 1;
-      
-      let color = '#3388ff'; // Default blue
+
+      let color = "#3388ff"; // Default blue
       let popupText = `Point ${index + 1}`;
-      
+
       if (isFirst) {
-        color = '#22c55e'; // Green for start
+        color = "#22c55e"; // Green for start
         popupText = `Start - ${popupText}`;
       } else if (isLast) {
-        color = '#ef4444'; // Red for current/latest
+        color = "#ef4444"; // Red for current/latest
         popupText = `Current - ${popupText}`;
       }
-      
+
       const marker = L.circleMarker([coord.lat, coord.lon], {
         radius: 8,
         fillColor: color,
-        color: '#ffffff',
+        color: "#ffffff",
         weight: 2,
         opacity: 1,
-        fillOpacity: 0.8
+        fillOpacity: 0.8,
       }).addTo(map);
-      
+
       // Add popup with coordinates and timestamp
       marker.bindPopup(`
         <b>${popupText}</b><br>
@@ -769,13 +777,13 @@ function updateMapRoute() {
         Lon: ${coord.lon.toFixed(6)}<br>
         Time: ${coord.timestamp.toLocaleTimeString()}
       `);
-      
+
       gpsMarkers.push(marker);
     });
-    
+
     // Update map stats
     updateMapStats(coordinates);
-    
+
     // Only auto-center the map if auto-follow is enabled
     if (isAutoFollowEnabled) {
       // Fit map to all points if this is the first time showing data
@@ -787,34 +795,37 @@ function updateMapRoute() {
     }
   } else {
     // No GPS data available
-    document.getElementById('map-stats').textContent = 'No GPS data available';
+    document.getElementById("map-stats").textContent = "No GPS data available";
   }
 }
 
 function updateMapStats(coordinates) {
   if (coordinates.length === 0) {
-    document.getElementById('map-stats').textContent = 'No GPS data';
+    document.getElementById("map-stats").textContent = "No GPS data";
     return;
   }
-  
+
   const statsText = `GPS Points: ${coordinates.length}`;
-  document.getElementById('map-stats').textContent = statsText;
+  document.getElementById("map-stats").textContent = statsText;
 }
 
 function calculateDistance(lat1, lon1, lat2, lon2) {
   const R = 6371; // Earth's radius in kilometers
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLon/2) * Math.sin(dLon/2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
 
 function fitMapToRoute() {
   if (!map || gpsMarkers.length === 0) return;
-  
+
   if (gpsMarkers.length === 1) {
     // Single point - center on it
     const marker = gpsMarkers[0];
@@ -837,31 +848,33 @@ function destroyMap() {
 
 function updateLiveMap() {
   // Update map with new GPS data if map modal is open
-  const mapModal = document.getElementById('MapModal');
-  if (mapModal && mapModal.classList.contains('show') && map) {
+  const mapModal = document.getElementById("MapModal");
+  if (mapModal && mapModal.classList.contains("show") && map) {
     updateMapRoute();
   }
 }
 
 function toggleAutoFollow() {
   isAutoFollowEnabled = !isAutoFollowEnabled;
-  const button = document.getElementById('auto-follow-toggle');
+  const button = document.getElementById("auto-follow-toggle");
   if (isAutoFollowEnabled) {
-    button.textContent = 'Auto Follow: ON';
-    button.className = 'btn btn-success';
+    button.textContent = "Auto Follow: ON";
+    button.className = "btn btn-success";
   } else {
-    button.textContent = 'Auto Follow: OFF';
-    button.className = 'btn btn-outline-secondary';
+    button.textContent = "Auto Follow: OFF";
+    button.className = "btn btn-outline-secondary";
   }
 }
 
 // Initialize the application when DOM is loaded
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener("DOMContentLoaded", function () {
   // Hide test mode button if disabled in production config
   if (!ENABLE_TEST_MODE) {
-    const testModeButton = document.querySelector('button[onclick="toggleTestMode()"]');
+    const testModeButton = document.querySelector(
+      'button[onclick="toggleTestMode()"]'
+    );
     if (testModeButton) {
-      testModeButton.style.display = 'none';
+      testModeButton.style.display = "none";
     }
   }
 
@@ -887,7 +900,7 @@ document.addEventListener('DOMContentLoaded', function() {
     .addEventListener("hidden.bs.modal", function () {
       destroyChart();
     });
-    
+
   // Add event listener for map modal
   document
     .getElementById("MapModal")
