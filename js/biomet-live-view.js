@@ -26,6 +26,23 @@ let isTestMode = false;
 // Add a global variable to track auto-follow state for the map
 let isAutoFollowEnabled = true;
 
+// Browser persistence configuration
+const MEASUREMENT_DB_NAME = "biomet-live-view";
+const MEASUREMENT_DB_VERSION = 2;
+const MEASUREMENT_STORE_NAME = "measurements";
+const MEASUREMENT_META_STORE_NAME = "meta";
+const MEASUREMENT_META_FIELDS_SIGNATURE_KEY = "fieldsSignature";
+const MEASUREMENT_DATE_INDEX = "dateKey";
+const DEFAULT_SCOPE_SUFFIX =
+  "Missing values or gaps here do not mean the logger recorded nothing; the logger still keeps its own full record.";
+
+let measurementDbPromise = null;
+let measurementPersistBuffer = [];
+let measurementPersistTimerId = null;
+let persistenceEnabled = true;
+let storageWarningShown = false;
+let historyViewDateKey = null;
+
 async function ConnectToSerial() {
   // If in test mode, stop it first
   if (isTestMode) {
@@ -104,13 +121,7 @@ async function disconnect() {
       '<div class="alert alert-success text-center" role="alert">Disconnected from Serial Device. Polling stopped. Data cleared.</div>';
 
     // Clear data display - reset all fields to NaN
-    for (let variable of BIOMET_BIKE_FIELDS_SELECTION) {
-      const element = document.getElementById(variable);
-      if (element) {
-        const unit = BIOMET_BIKE_PARAMS[variable]?.unit || "";
-        element.innerHTML = `NaN&nbsp;<span class="text-secondary">${unit}</span>`;
-      }
-    }
+    clearLiveDisplayValues();
 
     // Clear date/time displays
     document.getElementById("date-time-utc").innerHTML = "";
@@ -421,6 +432,571 @@ const BIOMET_BIKE_FIELDS_SELECTION = [
   "VapPress",
 ];
 
+function requestToPromise(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () =>
+      reject(request.error || new Error("IndexedDB request failed"));
+  });
+}
+
+function waitForTransaction(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () =>
+      reject(transaction.error || new Error("IndexedDB transaction failed"));
+    transaction.onabort = () =>
+      reject(transaction.error || new Error("IndexedDB transaction aborted"));
+  });
+}
+
+function showStorageWarning(message) {
+  console.warn(message);
+  if (storageWarningShown) {
+    return;
+  }
+
+  storageWarningShown = true;
+  const alertElement = document.getElementById("alert");
+  if (!alertElement) {
+    return;
+  }
+
+  alertElement.innerHTML = `<div class="alert alert-warning alert-dismissible fade show text-center" role="alert">
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+          </div>`;
+}
+
+function getFieldSignature() {
+  return BIOMET_BIKE_FIELDS.join(",");
+}
+
+function toLocalDateKey(dateObj) {
+  const year = dateObj.getFullYear();
+  const month = String(dateObj.getMonth() + 1).padStart(2, "0");
+  const day = String(dateObj.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dateKeyToHumanLabel(dateKey) {
+  const parsed = new Date(`${dateKey}T00:00:00`);
+  if (isNaN(parsed.getTime())) {
+    return dateKey;
+  }
+
+  return parsed.toLocaleDateString(navigator.language, {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+}
+
+function updateDataScopeBanner(prefixText, level = "info") {
+  const banner = document.getElementById("data-scope-banner");
+  if (!banner) {
+    return;
+  }
+
+  banner.className = `alert alert-${level} text-center`;
+  banner.textContent = `${prefixText} ${DEFAULT_SCOPE_SUFFIX}`;
+}
+
+function updateHistoryInfoText(message) {
+  const infoElement = document.getElementById("history-info");
+  if (infoElement) {
+    infoElement.textContent = message;
+  }
+}
+
+function clearLiveDisplayValues() {
+  for (let variable of BIOMET_BIKE_FIELDS_SELECTION) {
+    const element = document.getElementById(variable);
+    if (element) {
+      const unit = BIOMET_BIKE_PARAMS[variable]?.unit || "";
+      element.innerHTML = `NaN&nbsp;<span class="text-secondary">${unit}</span>`;
+    }
+  }
+}
+
+function openMeasurementDatabase() {
+  if (!("indexedDB" in window)) {
+    return Promise.reject(new Error("IndexedDB is not available in this browser"));
+  }
+
+  if (measurementDbPromise) {
+    return measurementDbPromise;
+  }
+
+  measurementDbPromise = new Promise((resolve, reject) => {
+    const openRequest = indexedDB.open(MEASUREMENT_DB_NAME, MEASUREMENT_DB_VERSION);
+
+    openRequest.onupgradeneeded = () => {
+      const db = openRequest.result;
+      const tx = openRequest.transaction;
+
+      if (!db.objectStoreNames.contains(MEASUREMENT_STORE_NAME)) {
+        const measurementStore = db.createObjectStore(MEASUREMENT_STORE_NAME, {
+          keyPath: "id",
+          autoIncrement: true,
+        });
+        measurementStore.createIndex("ts", "ts", { unique: false });
+        measurementStore.createIndex(MEASUREMENT_DATE_INDEX, MEASUREMENT_DATE_INDEX, {
+          unique: false,
+        });
+      } else {
+        const measurementStore = tx.objectStore(MEASUREMENT_STORE_NAME);
+        if (!measurementStore.indexNames.contains(MEASUREMENT_DATE_INDEX)) {
+          measurementStore.createIndex(MEASUREMENT_DATE_INDEX, MEASUREMENT_DATE_INDEX, {
+            unique: false,
+          });
+
+          measurementStore.openCursor().onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (!cursor) {
+              return;
+            }
+
+            const value = cursor.value;
+            if (!value[MEASUREMENT_DATE_INDEX] && typeof value.ts === "number") {
+              value[MEASUREMENT_DATE_INDEX] = toLocalDateKey(new Date(value.ts));
+              cursor.update(value);
+            }
+
+            cursor.continue();
+          };
+        }
+      }
+
+      if (!db.objectStoreNames.contains(MEASUREMENT_META_STORE_NAME)) {
+        db.createObjectStore(MEASUREMENT_META_STORE_NAME, { keyPath: "key" });
+      }
+    };
+
+    openRequest.onsuccess = () => resolve(openRequest.result);
+    openRequest.onerror = () =>
+      reject(openRequest.error || new Error("Failed to open IndexedDB"));
+  });
+
+  return measurementDbPromise;
+}
+
+async function getMetaValue(db, key) {
+  const tx = db.transaction([MEASUREMENT_META_STORE_NAME], "readonly");
+  const store = tx.objectStore(MEASUREMENT_META_STORE_NAME);
+  const result = await requestToPromise(store.get(key));
+  await waitForTransaction(tx);
+  return result ? result.value : null;
+}
+
+async function setMetaValue(db, key, value) {
+  const tx = db.transaction([MEASUREMENT_META_STORE_NAME], "readwrite");
+  tx.objectStore(MEASUREMENT_META_STORE_NAME).put({ key, value });
+  await waitForTransaction(tx);
+}
+
+async function clearPersistedMeasurements(db) {
+  const tx = db.transaction([MEASUREMENT_STORE_NAME], "readwrite");
+  tx.objectStore(MEASUREMENT_STORE_NAME).clear();
+  await waitForTransaction(tx);
+}
+
+function serializeDataPoint(dataPoint) {
+  return {
+    ts: dataPoint.timestamp.getTime(),
+    dateKey: toLocalDateKey(dataPoint.timestamp),
+    v: BIOMET_BIKE_FIELDS.map((field) => {
+      const value = dataPoint.data[field];
+      return Number.isFinite(value) ? value : null;
+    }),
+  };
+}
+
+function deserializeDataPoint(serializedPoint) {
+  const reconstructedData = {};
+  BIOMET_BIKE_FIELDS.forEach((field, index) => {
+    const value = serializedPoint.v[index];
+    reconstructedData[field] = value === null || value === undefined ? NaN : value;
+  });
+
+  return {
+    timestamp: new Date(serializedPoint.ts),
+    data: reconstructedData,
+  };
+}
+
+async function initializePersistence() {
+  if (!persistenceEnabled) {
+    return false;
+  }
+
+  try {
+    const db = await openMeasurementDatabase();
+    const storedSignature = await getMetaValue(
+      db,
+      MEASUREMENT_META_FIELDS_SIGNATURE_KEY
+    );
+    const currentSignature = getFieldSignature();
+
+    if (!storedSignature) {
+      await setMetaValue(
+        db,
+        MEASUREMENT_META_FIELDS_SIGNATURE_KEY,
+        currentSignature
+      );
+      return true;
+    }
+
+    if (storedSignature !== currentSignature) {
+      await clearPersistedMeasurements(db);
+      await setMetaValue(
+        db,
+        MEASUREMENT_META_FIELDS_SIGNATURE_KEY,
+        currentSignature
+      );
+      showStorageWarning(
+        "Stored measurement history was reset because the parameter schema changed."
+      );
+    }
+
+    return true;
+  } catch (error) {
+    persistenceEnabled = false;
+    showStorageWarning(
+      "Local storage is unavailable. Live measurements will work, but reload restore is disabled."
+    );
+    console.error("Persistence initialization failed:", error);
+    return false;
+  }
+}
+
+async function loadLatestPersistedData(limit) {
+  if (!persistenceEnabled) {
+    return [];
+  }
+
+  const ready = await initializePersistence();
+  if (!ready) {
+    return [];
+  }
+
+  try {
+    const db = await openMeasurementDatabase();
+    const tx = db.transaction([MEASUREMENT_STORE_NAME], "readonly");
+    const index = tx.objectStore(MEASUREMENT_STORE_NAME).index("ts");
+
+    const records = [];
+    await new Promise((resolve, reject) => {
+      const cursorRequest = index.openCursor(null, "prev");
+      cursorRequest.onsuccess = (event) => {
+        const cursor = event.target.result;
+        if (!cursor || records.length >= limit) {
+          resolve();
+          return;
+        }
+
+        records.push(cursor.value);
+        cursor.continue();
+      };
+      cursorRequest.onerror = () =>
+        reject(cursorRequest.error || new Error("Failed to read persisted data"));
+    });
+
+    await waitForTransaction(tx);
+    return records.reverse();
+  } catch (error) {
+    console.error("Failed to load persisted data:", error);
+    return [];
+  }
+}
+
+async function loadPersistedDataByDate(dateKey) {
+  if (!persistenceEnabled) {
+    return [];
+  }
+
+  const ready = await initializePersistence();
+  if (!ready) {
+    return [];
+  }
+
+  try {
+    const db = await openMeasurementDatabase();
+    const tx = db.transaction([MEASUREMENT_STORE_NAME], "readonly");
+    const index = tx.objectStore(MEASUREMENT_STORE_NAME).index(MEASUREMENT_DATE_INDEX);
+    const range = IDBKeyRange.only(dateKey);
+    const records = await requestToPromise(index.getAll(range));
+    await waitForTransaction(tx);
+
+    records.sort((a, b) => a.ts - b.ts);
+    return records;
+  } catch (error) {
+    console.error("Failed to load date-filtered data:", error);
+    return [];
+  }
+}
+
+async function listPersistedDateKeys() {
+  if (!persistenceEnabled) {
+    return [];
+  }
+
+  const ready = await initializePersistence();
+  if (!ready) {
+    return [];
+  }
+
+  try {
+    const db = await openMeasurementDatabase();
+    const tx = db.transaction([MEASUREMENT_STORE_NAME], "readonly");
+    const index = tx.objectStore(MEASUREMENT_STORE_NAME).index(MEASUREMENT_DATE_INDEX);
+    const keys = [];
+
+    await new Promise((resolve, reject) => {
+      const keyCursorRequest = index.openKeyCursor(null, "prevunique");
+      keyCursorRequest.onsuccess = (event) => {
+        const cursor = event.target.result;
+        if (!cursor) {
+          resolve();
+          return;
+        }
+
+        keys.push(cursor.key);
+        cursor.continue();
+      };
+      keyCursorRequest.onerror = () =>
+        reject(keyCursorRequest.error || new Error("Failed to list stored days"));
+    });
+
+    await waitForTransaction(tx);
+    return keys;
+  } catch (error) {
+    console.error("Failed to list available history days:", error);
+    return [];
+  }
+}
+
+function applyLoadedHistory(restoredRecords, scopeLabel, scopeLevel = "info") {
+  if (restoredRecords.length === 0) {
+    dataHistory = [];
+    clearLiveDisplayValues();
+    document.getElementById("date-time-utc").innerHTML = "";
+    document.getElementById("date-time-local").innerHTML = "";
+    updateDataScopeBanner(`${scopeLabel}: no data found in browser storage.`, "warning");
+    return;
+  }
+
+  dataHistory = restoredRecords.map((record) => deserializeDataPoint(record));
+  const latestDataPoint = dataHistory[dataHistory.length - 1];
+  renderSelectedValues(latestDataPoint.data);
+
+  document.getElementById("date-time-utc").innerHTML =
+    latestDataPoint.timestamp.toLocaleString(navigator.language, {
+      timeZone: "UTC",
+    });
+  document.getElementById("date-time-local").innerHTML =
+    latestDataPoint.timestamp.toLocaleString(navigator.language);
+
+  updateDataScopeBanner(
+    `${scopeLabel}: showing ${restoredRecords.length} samples from browser storage.`,
+    scopeLevel
+  );
+}
+
+async function flushPersistedData() {
+  if (!persistenceEnabled || measurementPersistBuffer.length === 0) {
+    return;
+  }
+
+  const batch = measurementPersistBuffer;
+  measurementPersistBuffer = [];
+
+  const ready = await initializePersistence();
+  if (!ready) {
+    return;
+  }
+
+  try {
+    const db = await openMeasurementDatabase();
+    const writeTx = db.transaction([MEASUREMENT_STORE_NAME], "readwrite");
+    const store = writeTx.objectStore(MEASUREMENT_STORE_NAME);
+
+    batch.forEach((item) => store.add(item));
+    await waitForTransaction(writeTx);
+  } catch (error) {
+    persistenceEnabled = false;
+    showStorageWarning(
+      "Unable to store measurements locally. Reload restore has been disabled for this session."
+    );
+    console.error("Persisting data failed:", error);
+  }
+}
+
+function queuePersistedDataPoint(dataPoint) {
+  if (!persistenceEnabled || isTestMode) {
+    return;
+  }
+
+  measurementPersistBuffer.push(serializeDataPoint(dataPoint));
+
+  if (measurementPersistTimerId !== null) {
+    return;
+  }
+
+  measurementPersistTimerId = window.setTimeout(async () => {
+    measurementPersistTimerId = null;
+    await flushPersistedData();
+  }, 1000);
+}
+
+function renderSelectedValues(parsedData) {
+  for (let variable of BIOMET_BIKE_FIELDS_SELECTION) {
+    const element = document.getElementById(variable);
+    if (element && BIOMET_BIKE_PARAMS[variable]) {
+      let new_content = `${formatValue(
+        variable,
+        parsedData[variable]
+      )} <span class="text-secondary">${
+        BIOMET_BIKE_PARAMS[variable].unit
+      }</span>`;
+      element.innerHTML = new_content;
+    }
+  }
+}
+
+async function restorePersistedData() {
+  const restoredRecords = await loadLatestPersistedData(maxDataPoints);
+  historyViewDateKey = null;
+  applyLoadedHistory(restoredRecords, "Latest window", "info");
+  updateHistoryInfoText(
+    restoredRecords.length > 0
+      ? `Loaded latest ${restoredRecords.length} samples from browser storage.`
+      : "No stored samples were found in browser storage."
+  );
+}
+
+async function loadStoredHistoryForDate(dateKey) {
+  const restoredRecords = await loadPersistedDataByDate(dateKey);
+  historyViewDateKey = dateKey;
+  applyLoadedHistory(
+    restoredRecords,
+    `Stored day ${dateKeyToHumanLabel(dateKey)}`,
+    "secondary"
+  );
+  updateHistoryInfoText(
+    restoredRecords.length > 0
+      ? `Loaded ${restoredRecords.length} samples for ${dateKeyToHumanLabel(dateKey)}.`
+      : `No samples found for ${dateKeyToHumanLabel(dateKey)}.`
+  );
+}
+
+async function refreshHistoryDateList() {
+  const selectElement = document.getElementById("history-date-select");
+  if (!selectElement) {
+    return;
+  }
+
+  const dateKeys = await listPersistedDateKeys();
+  selectElement.innerHTML = "";
+
+  if (dateKeys.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No stored days";
+    selectElement.appendChild(option);
+    return;
+  }
+
+  dateKeys.forEach((dateKey) => {
+    const option = document.createElement("option");
+    option.value = dateKey;
+    option.textContent = dateKeyToHumanLabel(dateKey);
+    selectElement.appendChild(option);
+  });
+}
+
+async function loadHistoryFromPicker() {
+  const picker = document.getElementById("history-date-picker");
+  if (!picker || !picker.value) {
+    updateHistoryInfoText("Please choose a date first.");
+    return;
+  }
+
+  await loadStoredHistoryForDate(picker.value);
+}
+
+async function loadHistoryFromSelect() {
+  const select = document.getElementById("history-date-select");
+  if (!select || !select.value) {
+    updateHistoryInfoText("No stored day selected.");
+    return;
+  }
+
+  const picker = document.getElementById("history-date-picker");
+  if (picker) {
+    picker.value = select.value;
+  }
+
+  await loadStoredHistoryForDate(select.value);
+}
+
+async function loadLatestStoredHistory() {
+  await restorePersistedData();
+}
+
+async function clearStoredHistory() {
+  if (!window.confirm("Clear all browser-stored measurements for this application?")) {
+    return;
+  }
+
+  if (measurementPersistTimerId !== null) {
+    window.clearTimeout(measurementPersistTimerId);
+    measurementPersistTimerId = null;
+  }
+  measurementPersistBuffer = [];
+
+  const ready = await initializePersistence();
+  if (!ready) {
+    updateHistoryInfoText("Storage is unavailable in this browser session.");
+    return;
+  }
+
+  try {
+    const db = await openMeasurementDatabase();
+    await clearPersistedMeasurements(db);
+    historyViewDateKey = null;
+    dataHistory = [];
+    clearLiveDisplayValues();
+    document.getElementById("date-time-utc").innerHTML = "";
+    document.getElementById("date-time-local").innerHTML = "";
+    updateDataScopeBanner("Stored browser history cleared.", "warning");
+    updateHistoryInfoText("All browser-stored measurements were cleared.");
+    await refreshHistoryDateList();
+  } catch (error) {
+    console.error("Failed to clear stored history:", error);
+    updateHistoryInfoText("Failed to clear stored history.");
+  }
+}
+
+function flushPersistedDataSoon() {
+  if (measurementPersistTimerId !== null) {
+    window.clearTimeout(measurementPersistTimerId);
+    measurementPersistTimerId = null;
+  }
+
+  flushPersistedData();
+}
+
+document.addEventListener("visibilitychange", function () {
+  if (document.visibilityState === "hidden") {
+    flushPersistedDataSoon();
+  }
+});
+
+window.addEventListener("beforeunload", function () {
+  flushPersistedDataSoon();
+});
+
 function parseDataFromString(dataString) {
   // Strip whitespace and remove control characters
   let s = dataString
@@ -591,6 +1167,12 @@ function updateLiveChart(newDataPoint) {
 
 // Update storeDataPoint to trigger live chart updates
 function storeDataPoint(parsedData) {
+  if (historyViewDateKey !== null) {
+    historyViewDateKey = null;
+    dataHistory = [];
+    updateDataScopeBanner("Live stream resumed.", "info");
+  }
+
   const dataPoint = {
     timestamp: new Date(),
     data: { ...parsedData },
@@ -601,6 +1183,8 @@ function storeDataPoint(parsedData) {
   if (dataHistory.length > maxDataPoints) {
     dataHistory = dataHistory.slice(-maxDataPoints);
   }
+
+  queuePersistedDataPoint(dataPoint);
 
   // Update live chart if it's open
   updateLiveChart(dataPoint);
@@ -666,18 +1250,7 @@ async function pollDevice() {
     storeDataPoint(parsed_response);
 
     // Update UI
-    for (let variable of BIOMET_BIKE_FIELDS_SELECTION) {
-      const element = document.getElementById(variable);
-      if (element && BIOMET_BIKE_PARAMS[variable]) {
-        let new_content = `${formatValue(
-          variable,
-          parsed_response[variable]
-        )} <span class="text-secondary">${
-          BIOMET_BIKE_PARAMS[variable].unit
-        }</span>`;
-        element.innerHTML = new_content;
-      }
-    }
+    renderSelectedValues(parsed_response);
   } catch (error) {
     console.error("Polling error:", error);
 
@@ -969,4 +1542,14 @@ document.addEventListener("DOMContentLoaded", function () {
         }, 100);
       }
     });
+
+  const historyDatePicker = document.getElementById("history-date-picker");
+  if (historyDatePicker) {
+    historyDatePicker.value = toLocalDateKey(new Date());
+  }
+
+  updateDataScopeBanner("Latest window.", "info");
+
+  restorePersistedData();
+  refreshHistoryDateList();
 });
