@@ -65,21 +65,15 @@ async function ConnectToSerial() {
       serialDecoder = new TextDecoder();
 
       isConnected = true;
-
-      document.getElementById("status").innerHTML =
-        '<div class="alert alert-success text-center" role="alert">Connected to Serial Device. Polling started...</div>';
+      showToast("Connected to serial device. Polling started.", "success");
 
       // Start polling automatically
       startPolling();
     } catch (error) {
-      document.getElementById("status").innerHTML =
-        '<div class="alert alert-danger text-center" role="alert">Failed to connect: ' +
-        error.message +
-        "</div>";
+      showToast(`Failed to connect: ${error.message}`, "danger", false);
     }
   } else {
-    document.getElementById("status").innerHTML =
-      '<div class="alert alert-danger text-center" role="alert">Web Serial API is not supported in this browser.</div>';
+    showToast("Web Serial API is not supported in this browser.", "danger", false);
   }
 }
 
@@ -116,9 +110,10 @@ async function disconnect() {
 
     // Destroy any open chart
     destroyChart();
-
-    document.getElementById("status").innerHTML =
-      '<div class="alert alert-success text-center" role="alert">Disconnected from Serial Device. Polling stopped. Data cleared.</div>';
+    showToast(
+      "Disconnected from serial device. Polling stopped. Data cleared.",
+      "success"
+    );
 
     // Clear data display - reset all fields to NaN
     clearLiveDisplayValues();
@@ -127,10 +122,7 @@ async function disconnect() {
     document.getElementById("date-time-utc").innerHTML = "";
     document.getElementById("date-time-local").innerHTML = "";
   } catch (error) {
-    document.getElementById("status").innerHTML =
-      '<div class="alert alert-danger text-center" role="alert">Failed to disconnect: ' +
-      error.message +
-      "</div>";
+    showToast(`Failed to disconnect: ${error.message}`, "danger", false);
   }
 }
 
@@ -457,15 +449,7 @@ function showStorageWarning(message) {
   }
 
   storageWarningShown = true;
-  const alertElement = document.getElementById("alert");
-  if (!alertElement) {
-    return;
-  }
-
-  alertElement.innerHTML = `<div class="alert alert-warning alert-dismissible fade show text-center" role="alert">
-            ${message}
-            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-          </div>`;
+  showToast(message, "warning", false);
 }
 
 function getFieldSignature() {
@@ -493,13 +477,49 @@ function dateKeyToHumanLabel(dateKey) {
 }
 
 function updateDataScopeBanner(prefixText, level = "info") {
-  const banner = document.getElementById("data-scope-banner");
-  if (!banner) {
+  const fullMessage = `${prefixText} ${DEFAULT_SCOPE_SUFFIX}`;
+  showToast(fullMessage, level);
+}
+
+function showToast(message, level = "info", autohide = true, delay = 7000) {
+  const toastContainer = document.getElementById("toast-container");
+  if (!toastContainer) {
+    console.warn(message);
     return;
   }
 
-  banner.className = `alert alert-${level} text-center`;
-  banner.textContent = `${prefixText} ${DEFAULT_SCOPE_SUFFIX}`;
+  const levelToClass = {
+    info: "text-bg-info",
+    warning: "text-bg-warning",
+    danger: "text-bg-danger",
+    success: "text-bg-success",
+    secondary: "text-bg-secondary",
+  };
+
+  const colorClass = levelToClass[level] || "text-bg-info";
+  const toastElement = document.createElement("div");
+  toastElement.className = `toast align-items-center border-0 ${colorClass}`;
+  toastElement.setAttribute("role", "status");
+  toastElement.setAttribute("aria-live", "polite");
+  toastElement.setAttribute("aria-atomic", "true");
+  toastElement.innerHTML = `<div class="d-flex">
+      <div class="toast-body">${message}</div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+    </div>`;
+
+  toastContainer.appendChild(toastElement);
+
+  if (window.bootstrap && bootstrap.Toast) {
+    const toast = new bootstrap.Toast(toastElement, { autohide, delay });
+    toastElement.addEventListener("hidden.bs.toast", function () {
+      toastElement.remove();
+    });
+    toast.show();
+  } else {
+    window.setTimeout(() => {
+      toastElement.remove();
+    }, delay);
+  }
 }
 
 function updateHistoryInfoText(message) {
@@ -890,10 +910,14 @@ async function loadStoredHistoryForDate(dateKey) {
   );
 }
 
-async function refreshHistoryDateList() {
+async function refreshHistoryDateList(showNotice = false) {
   const selectElement = document.getElementById("history-date-select");
   if (!selectElement) {
     return;
+  }
+
+  if (showNotice) {
+    updateDataScopeBanner("History view opened.", "warning");
   }
 
   const dateKeys = await listPersistedDateKeys();
@@ -1232,17 +1256,12 @@ async function pollDevice() {
       return;
     }
 
-    // Clear any previous error alerts
-    document.getElementById("alert").innerHTML = "";
-
     const parsed_response = parseDataFromString(response);
     if (!parsed_response) {
-      document.getElementById(
-        "alert"
-      ).innerHTML = `<div class="alert alert-warning alert-dismissible fade show text-center" role="alert">
-            Invalid frame: expected ${BIOMET_BIKE_FIELDS.length} values.
-            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-          </div>`;
+      showToast(
+        `Invalid frame: expected ${BIOMET_BIKE_FIELDS.length} values.`,
+        "warning"
+      );
       return;
     }
 
@@ -1270,12 +1289,7 @@ async function pollDevice() {
       reader = null;
     }
 
-    document.getElementById(
-      "alert"
-    ).innerHTML = `<div class="alert alert-warning alert-dismissible fade show text-center" role="alert">
-            Polling error: ${error.message}
-            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-          </div>`;
+    showToast(`Polling error: ${error.message}`, "warning", false);
   }
 }
 
@@ -1315,10 +1329,11 @@ function showMap() {
     map = L.map("map").setView([51.5136, 7.4653], 13);
 
     if (window.location.protocol === "file:") {
-      document.getElementById("alert").innerHTML = `<div class="alert alert-warning alert-dismissible fade show text-center" role="alert">
-            Map tiles may be blocked when opened as a local file. Start the app via HTTP (for example: localhost) so the browser can send a valid referer.
-            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-          </div>`;
+      showToast(
+        "Map tiles may be blocked when opened as a local file. Start the app via HTTP (for example: localhost) so the browser can send a valid referer.",
+        "warning",
+        false
+      );
     }
 
     // Add OpenStreetMap tiles
@@ -1551,5 +1566,5 @@ document.addEventListener("DOMContentLoaded", function () {
   updateDataScopeBanner("Latest window.", "info");
 
   restorePersistedData();
-  refreshHistoryDateList();
+  refreshHistoryDateList(false);
 });

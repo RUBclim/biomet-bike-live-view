@@ -50,12 +50,12 @@
     <title>Biomet Bike Live View</title>
   </head>
   <body>
+    <div
+      id="toast-container"
+      class="toast-container position-fixed top-0 end-0 p-3"
+      style="z-index: 1200"
+    ></div>
     <div class="fluid-container mt-3 mx-4">
-      <div id="alert"></div>
-      <div id="status"></div>
-      <div id="data-scope-banner" class="alert alert-info text-center" role="alert">
-        Showing browser view only. Missing values or gaps here do not mean the logger recorded nothing; the logger retains its own full record.
-      </div>
       <div class="d-flex justify-content-center">
         <span id="date-time-utc" class="mx-3 my-auto"></span>
         <div class="btn-group" role="group" style="width: 300px">
@@ -91,7 +91,7 @@
           type="button"
           data-bs-toggle="modal"
           data-bs-target="#HistoryModal"
-          onclick="refreshHistoryDateList()"
+          onclick="refreshHistoryDateList(true)"
         >
           History
         </button>
@@ -158,9 +158,6 @@
             ></button>
           </div>
           <div class="modal-body">
-            <div class="alert alert-warning" role="alert">
-              Browser history is only a local view. Missing values or missing periods here do not imply missing logger records; the logger still keeps its own data.
-            </div>
             <div class="row g-3 align-items-end">
               <div class="col-md-6">
                 <label for="history-date-picker" class="form-label">Choose day</label>
