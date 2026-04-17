@@ -1,16 +1,17 @@
 // Biomet Live View JavaScript
 
 // PRODUCTION CONFIG: Set to false to disable test mode button in production
-const ENABLE_TEST_MODE = true;
+const ENABLE_TEST_MODE = false;
 
 let isConnected = false;
 let isPolling = false;
 let reader = null;
-let writer = null;
 let chart = null;
 let map = null;
 let gpsMarkers = [];
 let currentPositionMarker = null;
+let serialReadBuffer = "";
+let serialDecoder = new TextDecoder();
 
 // Update the global variables
 let dataHistory = [];
@@ -41,11 +42,13 @@ async function ConnectToSerial() {
       // Open the port immediately
       await window.selectedPort.open({ baudRate: 115200 });
 
-      // Get reader and writer
+      // Get reader
       reader = window.selectedPort.readable.getReader();
-      writer = window.selectedPort.writable.getWriter();
+      serialReadBuffer = "";
+      serialDecoder = new TextDecoder();
 
       isConnected = true;
+
       document.getElementById("status").innerHTML =
         '<div class="alert alert-success text-center" role="alert">Connected to Serial Device. Polling started...</div>';
 
@@ -74,16 +77,14 @@ async function disconnect() {
       return;
     }
 
-    // Release reader and writer
+    // Release reader
     if (reader) {
       await reader.cancel();
       reader.releaseLock();
       reader = null;
     }
-    if (writer) {
-      writer.releaseLock();
-      writer = null;
-    }
+
+    serialReadBuffer = "";
 
     // Close port
     if (window.selectedPort) {
@@ -428,6 +429,11 @@ function parseDataFromString(dataString) {
     .replace(/[\r\n]/g, "");
 
   const values = s.split(",");
+
+  if (values.length !== BIOMET_BIKE_FIELDS.length) {
+    return null;
+  }
+
   const parsed = {};
 
   // Parse each value and assign to corresponding field
@@ -440,16 +446,25 @@ function parseDataFromString(dataString) {
     }
   });
 
-  // If we don't have enough values, fill with NaN
-  if (values.length !== BIOMET_BIKE_FIELDS.length) {
-    BIOMET_BIKE_FIELDS.forEach((field) => {
-      if (!(field in parsed)) {
-        parsed[field] = NaN;
-      }
-    });
+  return parsed;
+}
+
+function extractNextSerialFrame() {
+  if (!serialReadBuffer) {
+    return null;
   }
 
-  return parsed;
+  const match = serialReadBuffer.match(/\r\n|\n|\r/);
+  if (!match || match.index === undefined) {
+    return null;
+  }
+
+  const endIndex = match.index;
+  const eolLength = match[0].length;
+  const frame = serialReadBuffer.slice(0, endIndex).replace(/\x03/g, "").trim();
+  serialReadBuffer = serialReadBuffer.slice(endIndex + eolLength);
+
+  return frame || null;
 }
 
 // Update createChart to show all available data
@@ -609,38 +624,43 @@ async function pollDevice() {
   }
 
   try {
-    let response;
+    if (!window.selectedPort || !window.selectedPort.readable || !reader) {
+      throw new Error("No serial device connected");
+    }
 
-    // Check if we're actually connected to a serial device or use test data
-    if (
-      window.selectedPort &&
-      window.selectedPort.readable &&
-      reader &&
-      writer
-    ) {
-      // Real serial device polling
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Read timeout")), 1000)
-      );
+    let response = extractNextSerialFrame();
+    while (isPolling && isConnected && response === null) {
+      const { value, done } = await reader.read();
 
-      const readPromise = reader.read();
-      const { value, done } = await Promise.race([readPromise, timeoutPromise]);
-
-      if (done || !value) {
-        throw new Error("No data received");
+      if (done) {
+        throw new Error("Serial stream ended");
       }
 
-      const decoder = new TextDecoder();
-      response = decoder.decode(value);
-    } else {
-      // Generate test data if no real device or in test mode
-      response = generateTestData();
+      if (!value || value.length === 0) {
+        continue;
+      }
+
+      serialReadBuffer += serialDecoder.decode(value, { stream: true });
+      response = extractNextSerialFrame();
+    }
+
+    if (response === null) {
+      return;
     }
 
     // Clear any previous error alerts
     document.getElementById("alert").innerHTML = "";
 
     const parsed_response = parseDataFromString(response);
+    if (!parsed_response) {
+      document.getElementById(
+        "alert"
+      ).innerHTML = `<div class="alert alert-warning alert-dismissible fade show text-center" role="alert">
+            Invalid frame: expected ${BIOMET_BIKE_FIELDS.length} values.
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+          </div>`;
+      return;
+    }
 
     // Store data for charting
     storeDataPoint(parsed_response);
@@ -660,7 +680,23 @@ async function pollDevice() {
     }
   } catch (error) {
     console.error("Polling error:", error);
-    // Show all polling errors in the alert box
+
+    if (error.name === "AbortError") {
+      return;
+    }
+
+    stopPolling();
+    isConnected = false;
+
+    if (reader) {
+      try {
+        reader.releaseLock();
+      } catch (releaseError) {
+        console.warn("Error releasing reader:", releaseError);
+      }
+      reader = null;
+    }
+
     document.getElementById(
       "alert"
     ).innerHTML = `<div class="alert alert-warning alert-dismissible fade show text-center" role="alert">
@@ -671,7 +707,11 @@ async function pollDevice() {
 }
 
 async function startPolling() {
-  if (!isConnected) {
+  if (!isConnected || !reader) {
+    return;
+  }
+
+  if (isPolling) {
     return;
   }
 
@@ -679,16 +719,15 @@ async function startPolling() {
 
   // Start continuous polling loop
   while (isPolling && isConnected) {
-    // set the date and time in UTC
+    await pollDevice();
+
+    // set the date and time in UTC/local after each received frame
     let dateTimeUTC = new Date().toLocaleString(navigator.language, {
       timeZone: "UTC",
     });
     document.getElementById("date-time-utc").innerHTML = dateTimeUTC;
-    /* local datetime */
     let dateTimeLocal = new Date().toLocaleString(navigator.language);
     document.getElementById("date-time-local").innerHTML = dateTimeLocal;
-    await pollDevice();
-    await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1 second between polls
   }
 }
 
@@ -702,11 +741,28 @@ function showMap() {
     // Initialize map centered over Dortmund, Germany
     map = L.map("map").setView([51.5136, 7.4653], 13);
 
+    if (window.location.protocol === "file:") {
+      document.getElementById("alert").innerHTML = `<div class="alert alert-warning alert-dismissible fade show text-center" role="alert">
+            Map tiles may be blocked when opened as a local file. Start the app via HTTP (for example: localhost) so the browser can send a valid referer.
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+          </div>`;
+    }
+
     // Add OpenStreetMap tiles
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    const tileLayer = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution:
         '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-    }).addTo(map);
+      // Ensure tile requests include an origin referer when the browser allows it.
+      referrerPolicy: "origin",
+      crossOrigin: "anonymous",
+    });
+
+    tileLayer.on("tileerror", function () {
+      document.getElementById("map-stats").textContent =
+        "Map tiles failed to load. If running locally, use http://localhost instead of file://.";
+    });
+
+    tileLayer.addTo(map);
   }
 
   // Update map with current route data
