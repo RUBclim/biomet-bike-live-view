@@ -88,11 +88,21 @@ async function disconnect() {
       return;
     }
 
-    // Release reader
-    if (reader) {
-      await reader.cancel();
-      reader.releaseLock();
-      reader = null;
+    // Release reader safely even if polling teardown runs concurrently
+    const activeReader = reader;
+    reader = null;
+    if (activeReader) {
+      try {
+        await activeReader.cancel();
+      } catch (cancelError) {
+        // Ignore cancel errors during disconnect race conditions.
+      }
+
+      try {
+        activeReader.releaseLock();
+      } catch (releaseError) {
+        // Ignore release errors if the lock was already released.
+      }
     }
 
     serialReadBuffer = "";
